@@ -1,0 +1,77 @@
+"""""
+This code simulates the Ornstein-Uhlenbeck (OU) process, a mean-reverting stochastic model widely used in finance and physics, 
+defined as $ X_T = e^{-a(T-t)} X_t + \int_t^T e^{-a(T-s)} \sigma dW_s^{\mathbb{Q}} $, where $ X_t $ evolves under a risk-neutral measure with mean reversion rate $ a $, 
+volatility $ \sigma $, and Brownian motion. Using Monte Carlo simulation with 50,000 paths and 10,000 time steps, 
+it approximates the stochastic integral via a Riemann sum, computes the numerical mean and variance of $ X_T $ at $ T = 2 $, and compares these with the 
+analytical mean $ e^{-a(T-t)} X_t $ and variance obtained through numerical integration of $ \sigma^2 \int_t^T e^{-2a(T-s)} ds $. 
+Intuitively, we’re modeling a process that drifts back toward a mean while being nudged by random shocks, estimating its expected value and variability at a future time, 
+and validating our simulation against theoretical results to ensure accuracy.
+
+"""""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import quad
+
+
+# === Parameters ===
+T = 2
+t = 0
+paths = 50000
+steps = 10000
+dt = T/steps
+X0 = 0.08
+X_t = np.zeros((paths, steps+1))
+X_t[:,0] = X0
+R_t = np.zeros((paths, steps+1))
+a = 0.05
+dw = np.random.normal(0, np.sqrt(dt), [paths,steps])
+sigma = 0.12
+
+
+#Simulate the Stochastic Integral
+def stochastic_integral(a,T,sigma):
+    for i in range(0,steps):
+        R_t[:,i+1]= R_t[:,i] + np.exp(-a*(T-i*dt)) * sigma * dw[:,i]
+    return R_t
+        
+    
+#numerical mean
+random_term = stochastic_integral(a,T,sigma)
+
+drift = np.exp(-a*(T-t))*X0
+
+numerical_mean = drift + np.mean(random_term[:,-1])
+
+
+
+#numerical Variance
+
+X_T = drift + random_term[:,-1]
+
+numerical_var = np.var(X_T)
+
+
+
+
+
+#analytcal mean 
+
+mean = np.exp(-a*(T-t)) *X0
+
+
+#analytical var
+
+f = lambda s: np.exp(-2*a*(T-s)) 
+
+result, error = quad(f,t,T)
+
+var = result * sigma**2
+
+
+
+# === Output ===
+print(f'analytical mean is {mean}')
+print(f'montecarlo mean is {numerical_mean}')
+print(f'analytic var is {var}')
+print(f'monte carlo var is {numerical_var}')
