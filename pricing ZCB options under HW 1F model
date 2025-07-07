@@ -1,0 +1,87 @@
+import numpy as np
+from scipy.interpolate import interp1d
+from scipy.integrate import quad
+from scipy.stats import norm
+
+# Market data
+maturities = np.array([0.0, 0.2493150684931507, 0.5013698630136987, 0.7534246575342466,
+                       1.0, 3.0082191780821916, 5.002739726027397, 8.005479452054795,
+                       10.008219178082191, 15.013698630136986, 20.019178082191782,
+                       25.016438356164382])
+discount_factors = np.array([1.0, 0.9828472951503892, 0.9655676031402194, 0.9481221554793985,
+                             0.9309067565567731, 0.7864070426924387, 0.6586262149130966,
+                             0.4731428899670019, 0.36771603681856185, 0.20626168272503248,
+                             0.1201872976177416, 0.0830308835811612])
+
+# discount curve
+P0T = interp1d(maturities, discount_factors, kind='linear', fill_value="extrapolate")
+x0 = 0  
+
+# Hull-White B 
+def HW_B(t, T, a):
+    return (1 - np.exp(-a * (T - t))) / a
+
+# Variance integrand for V(t,T,U)
+def v(s, t, T, U, a, sigma):
+    return ((1 - np.exp(-a * (U - s))) ** 2 * sigma**2 / a**2)
+
+# Hull-White A 
+def HW_A(t, T, a, sigma):
+    P0T_T = P0T(T)
+    P0T_t = P0T(t)
+    v_0_t_t, _ = quad(lambda s: v(s, 0, t, t, a, sigma), 0, t)
+    v_0_t_T, _ = quad(lambda s: v(s, 0, t, T, a, sigma), 0, t)
+    return (P0T_T / P0T_t) * np.exp(0.5 * (v_0_t_t - v_0_t_T))
+
+# Drift  μ_t (under T-forward measure)
+def mu_t(s, t, a, sigma):
+    return -(sigma**2 / a) * (np.exp(-a * (t - s)) - np.exp(-2 * a * (t - s)))
+
+# Variance of X_t (Σ_t^2)
+def variance_X(s, t, a, sigma):
+    return sigma**2 * np.exp(-2 * a * (t - s))
+
+# ZCB Call Option Price 
+def zcb_call(t, T, a, sigma, K):
+    var_X, _ = quad(lambda s: variance_X(s, t, a, sigma), 0, t)
+    mu_tt, _ = quad(lambda s: mu_t(s, t, a, sigma), 0, t)
+    A = HW_A(t, T, a, sigma)
+    B_val = HW_B(t, T, a)
+    
+    epsilon = (np.log(A / K) / B_val - mu_tt) / np.sqrt(var_X)
+    exponent = 0.5 * B_val**2 * var_X - B_val * mu_tt
+    term1 = A * np.exp(exponent) * norm.cdf(epsilon + B_val * np.sqrt(var_X))
+    term2 = K * norm.cdf(epsilon)
+    return P0T(t) * (term1 - term2) 
+
+# ZCB Put Option Price 
+def zcb_put(t, T, a, sigma, K):
+    var_X, _ = quad(lambda s: variance_X(s, t, a, sigma), 0, t)
+    mu_tt, _ = quad(lambda s: mu_t(s, t, a, sigma), 0, t)
+    A = HW_A(t, T, a, sigma)
+    B_val = HW_B(t, T, a)
+    
+    epsilon = (np.log(A / K) / B_val - mu_tt) / np.sqrt(var_X)
+    exponent = 0.5 * B_val**2 * var_X - B_val * mu_tt
+    term1 = A * np.exp(exponent) * norm.cdf(-epsilon - B_val * np.sqrt(var_X))
+    term2 = K * norm.cdf(-epsilon)
+    return P0T(t) * (term2 - term1)  
+
+#put call parity (call - put = -K*P0T(t) + P0T(T))
+t= 0.5
+T = 3
+a = 0.2
+sigma = 0.05
+K = 0.79
+
+call_price = zcb_call(t, T, a, sigma, K)
+put_price = zcb_put(t, T, a, sigma, K)
+
+rhs = -K*P0T(t) + P0T(T)
+
+#put call parity check 
+
+lhs = call_price - put_price
+
+check = lhs - rhs
+check
