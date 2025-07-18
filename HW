@@ -1,0 +1,576 @@
+import pandas as pd
+import numpy as np
+from scipy.interpolate import interp1d
+from scipy.stats import norm
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+from scipy.optimize import root_scalar
+
+
+# Define the data
+Adjusted_Date = [
+    "08-Mar-24", "10-Jun-24", "09-Sep-24", "09-Dec-24", "10-Mar-25", "09-Jun-25", "08-Sep-25", "08-Dec-25",
+    "09-Mar-26", "08-Jun-26", "08-Sep-26", "08-Dec-26", "08-Mar-27", "08-Jun-27", "08-Sep-27", "08-Dec-27",
+    "08-Mar-28", "08-Jun-28", "08-Sep-28", "08-Dec-28", "08-Mar-29", "08-Jun-29", "10-Sep-29", "10-Dec-29",
+    "08-Mar-30", "10-Jun-30", "09-Sep-30", "09-Dec-30", "10-Mar-31", "09-Jun-31", "08-Sep-31", "08-Dec-31",
+    "08-Mar-32", "08-Jun-32", "08-Sep-32", "08-Dec-32", "08-Mar-33", "08-Jun-33", "08-Sep-33", "08-Dec-33",
+    "08-Mar-34", "08-Jun-34", "08-Sep-34", "08-Dec-34", "08-Mar-35", "08-Jun-35", "10-Sep-35", "10-Dec-35",
+    "10-Mar-36", "09-Jun-36", "08-Sep-36", "08-Dec-36", "09-Mar-37", "08-Jun-37", "08-Sep-37", "08-Dec-37",
+    "08-Mar-38", "08-Jun-38", "08-Sep-38", "08-Dec-38"
+]
+
+Swap_Curve = [
+    1.0, 0.982283157, 0.965180733, 0.947919922, 0.930497456, 0.911211168, 0.892324623, 0.873829538,
+    0.855717797, 0.837981456, 0.820423882, 0.803419073, 0.786947824, 0.76953376, 0.752484494, 0.735993039,
+    0.719862585, 0.703914217, 0.68831918, 0.673233874, 0.658638965, 0.6406416437, 0.622723429, 0.605854825,
+    0.589977055, 0.573476071, 0.557941501, 0.542827738, 0.528123384, 0.513817347, 0.499898839, 0.486357361,
+    0.473182701, 0.458700058, 0.444627863, 0.431133376, 0.418190057, 0.405360647, 0.392924823, 0.380999527,
+    0.369561307, 0.35822375, 0.347234011, 0.336695434, 0.326587295, 0.316568113, 0.30664852, 0.297341715,
+    0.288199382, 0.277737841, 0.266963732, 0.256940091, 0.247292807, 0.238007747, 0.228974997, 0.220377713,
+    0.212192448, 0.204139427, 0.19639203, 0.189018133
+]
+
+
+#strike rate
+
+strikes = [ 0.100074324, 0.102904535, 0.10663161, 0.110585852, 0.116258127, 0.117782681, 0.120343474, 0.125507848, 0.125550149 ]
+
+#market swaption prices 
+
+market_price = [0.066377, 0.086069, 0.096301, 0.094158, 0.087023, 0.070395, 0.053721, 0.035002, 0.015770]
+
+# Parse dates into datetime objects
+date_format = "%d-%b-%y"
+dates = [datetime.strptime(date_str, date_format) for date_str in Adjusted_Date]
+
+# Calculate forward rates using actual time differences
+forward_rates = []
+for i in range(len(dates) - 1):
+    delta_t = (dates[i + 1] - dates[i]).days / 365.0  # Time difference in years
+    df_i = Swap_Curve[i]
+    df_i1 = Swap_Curve[i + 1]
+    if df_i > 0 and df_i1 > 0:  # Ensure no log of zero or negative
+        f_rate = (1 / delta_t) * np.log(df_i / df_i1)  # Forward rate formula
+        forward_rates.append(f_rate)
+    else:
+        forward_rates.append(np.nan)
+forward_rates.append(np.nan)  # No forward rate for the last date
+
+# Create pandas DataFrame
+df = pd.DataFrame({
+    'Date': Adjusted_Date,
+    'Discount Factor': Swap_Curve,
+    'Forward Rate': forward_rates
+})
+
+
+# Valuation date
+val_date = datetime.strptime("08-Mar-24", "%d-%b-%y")
+date_format = "%d-%b-%y"
+T_max = datetime.strptime("08-Mar-34", "%d-%b-%y")
+
+
+# swaption maturity dates adjusted for holidays
+expiry_years = list(range(1, 10)) 
+maturities = [(Val_date + relativedelta(years=years)) for years in expiry_years]
+#sigma 
+sigma = np.array([0.02]*len(maturities))
+
+def adjust_to_business_day(date):
+    while date.weekday() >= 5:  
+        date += pd.Timedelta(days=1)
+    return date
+
+#B function 
+def HW_B(a,T,t):
+    expr = 1/a * (1 - np.exp(-a*(T-t)))
+    return expr
+
+# Generate swaption schedule 
+swaption_schedule = []
+for i, expiry_date in enumerate(maturities):  
+    
+    swap_end = T_max
+    
+    adj_maturities = adjust_to_business_day(expiry_date).strftime(date_format)
+    swap_start = datetime.strptime(adj_maturities, date_format)
+    Swaption_expiry_years = (datetime.strptime(adj_maturities, date_format) - Val_date).days/365 
+    
+    # Calculate tenor in years (using actual days)
+    tenor_days = (swap_end - expiry_date).days
+    #tenor_days = (datetime.strptime(swap_end, date_format) - datetime.strptime(expiry_date, date_format)).days
+    tenor_years = tenor_days / 365.0
+    
+    # Generate quarterly payment dates for the underlying swap
+    payment_dates = []
+    payment_years = [] 
+    current_date = Val_date + relativedelta(years=expiry_years[i]) #swap_start
+    next_payment = current_date + relativedelta(months=3)
+    
+    
+    # Generate payments until we reach swap_end
+    while current_date <= swap_end:  
+        adj_date = adjust_to_business_day(current_date)
+        pay_yrs = (adj_date - Val_date).days/365
+        payment_dates.append(adj_date.strftime(date_format))
+        current_date = current_date + relativedelta(months=3)
+        payment_years.append(pay_yrs)
+        #next_payment = current_date + relativedelta(months=3)
+    
+    # Calculate HW_B values for each payment date
+    a = 0.05  # Assumed mean reversion rate; adjust as needed
+    expiry_datetime = datetime.strptime(adj_maturities, date_format)
+    payment_datetimes = [datetime.strptime(date, date_format) for date in payment_dates]
+    hw_b_values = [
+        HW_B(a, (T - expiry_datetime).days / 365.0, 0)
+        for T in payment_datetimes
+    ]
+    
+    # Add to schedule with corresponding volatility and HW_B values
+    swaption_schedule.append({
+        "Expiry_Date": adj_maturities,
+        "Tenor_Years": round(tenor_years, 2),
+        "Swap_Start": swap_start.strftime(date_format),
+        "Swap_End": swap_end.strftime(date_format),
+        "Payment_Dates": payment_dates, 
+        "Swaption_expiry_years" : Swaption_expiry_years,
+        "payment_years" : payment_years,
+        "HW_B": hw_b_values
+    })
+    
+    
+swaption_schedule = pd.DataFrame(swaption_schedule)
+    
+
+#calculation of v_0_t_t
+swaption_expiry_years_list = swaption_schedule['Swaption_expiry_years'].tolist()
+
+import numpy as np
+
+def HW_V(t_upper, t_lower, U, a, sigma):
+    term1 = sigma**2 / a**2
+    term2 = (t_upper - t_lower) + (1 / (2 * a)) * (np.exp(2 * a * (t_upper - U)) - np.exp(2 * a * (t_lower - U)))
+    term3 = (2 / a) * (np.exp(a * (t_upper - U)) - np.exp(a * (t_lower - U)))
+    return term1 * (term2 - term3)
+
+def calculate_cumulative_hw_v(swaption_expiry_years_list, sigma_array, a=0.05):
+    n = len(swaption_expiry_years_list)
+    cumulative_hw_v_list = []
+    for k in range(n):
+        cumulative = 0.0
+        U_k = swaption_expiry_years_list[k]  # Current swaption expiry U
+        for j in range(k + 1):
+            t_upper = swaption_expiry_years_list[j]
+            t_lower = swaption_expiry_years_list[j - 1] if j > 0 else 0.0
+            sigma_val = sigma_array[j]
+            hw_v_val = HW_V(t_upper, t_lower, U_k, a, sigma_val)
+            cumulative += hw_v_val
+        cumulative_hw_v_list.append(cumulative)
+    return cumulative_hw_v_list
+
+
+# Compute cumulative HW_V0tt values
+cumulative_hw_v_values = calculate_cumulative_hw_v(swaption_expiry_years_list, sigma, a=0.05)
+
+# Assign to DataFrame
+swaption_schedule['HW_V0tt'] = cumulative_hw_v_values
+
+# Compute cumulative HW_V0tT values
+
+swaption_payment_list = swaption_schedule['payment_years'].tolist()
+
+# Define a helper function to compute HW_V0tT for a given payment time T and swaption expiry
+def compute_HW_V0tT(U, T, a, sigma_val):
+    # Integral from 0 to U of [sigma * B(s,T)]^2 ds
+    term1 = sigma_val**2 / a**2
+    term2 = U + (1/(2*a)) * (np.exp(2*a*(U - T)) - np.exp(-2*a*T))
+    term3 = (2/a) * (np.exp(a*(U - T)) - np.exp(-a*T))
+    return term1 * (term2 - term3)
+
+# Precompute HW_V0tT for each payment date in each swaption
+hw_v0tT_list = []
+for i, row in swaption_schedule.iterrows():
+    U = row['Swaption_expiry_years']  # Swaption expiry time
+    sigma_val = sigma[i]              # Volatility for this swaption
+    payment_times = row['payment_years']
+    
+    # Compute HW_V0tT for each payment time in this swaption
+    hw_v0tT_swaption = []
+    for T in payment_times:
+        # Only compute if payment occurs AFTER swaption expiry
+        if T >= U:
+            v = compute_HW_V0tT(U, T, a=0.05, sigma_val=sigma_val)
+        else:
+            v = 0.0  # Payment before/at expiry has zero variance
+        hw_v0tT_swaption.append(v)
+    hw_v0tT_list.append(hw_v0tT_swaption)
+
+# Add results to DataFrame
+swaption_schedule['HW_V0tT'] = hw_v0tT_list
+
+
+# Build discount factor interpolation function
+curve_dates = [datetime.strptime(d, date_format) for d in Adjusted_Date]
+curve_times = [(d - Val_date).days / 365.0 for d in curve_dates]
+interp_func = interp1d(curve_times, Swap_Curve, kind='linear', fill_value='extrapolate')
+
+# Function to get discount factor for any time
+def get_discount_factor(time):
+    return float(interp_func(time))
+
+# Calculate A(t,T) for each payment date
+A_values_list = []
+for i, row in swaption_schedule.iterrows():
+    t = row['Swaption_expiry_years']  # Swaption expiry time
+    P0t = get_discount_factor(t)      # P(0,t) - discount factor at expiry
+    
+    # Get variance terms
+    V0tt = row['HW_V0tt']  # V(0,t,t)
+    V0tT_list = row['HW_V0tT']  # List of V(0,t,T) for each payment T
+    
+    # Calculate A(t,T) for each payment date
+    A_swaption = []
+    for j, T in enumerate(row['payment_years']):
+        if T < t:
+            # For payments before expiry, A(t,T) is not defined in this context
+            A_val = 1.0
+        else:
+            P0T = get_discount_factor(T)  # P(0,T) - discount factor at payment
+            V0tT = V0tT_list[j]           # V(0,t,T) for this payment
+            
+            # Apply the formula: A(t,T) = P(0,T)/P(0,t) * exp((V0tt - V0tT)/2)
+            exponent = (V0tt - V0tT) / 2.0
+            A_val = (P0T / P0t) * np.exp(exponent)
+        A_swaption.append(A_val)
+    
+    A_values_list.append(A_swaption)
+
+# Add the A(t,T) values to the DataFrame
+swaption_schedule['A_tT'] = A_values_list
+
+#calculate mu_t and sigma function 
+
+#calculate mu_t and sigma function 
+
+def mu_t(t_upper, t_lower, option_expiry, a, sigma):
+    term4 = sigma**2 / (2 * a)**2
+    term5 = 2*(np.exp(-a*(option_expiry - t_upper))   - np.exp(-a*(option_expiry - t_lower)))
+    term6 = np.exp(-2*a*(option_expiry - t_upper)) - np.exp(-2*a*(option_expiry - t_lower))
+    return -(term4 * (term5 - term6))
+
+# Calculate cumulative mu_t for each swaption expiry
+mu_t_cumulative_list = []
+a = 0.05
+
+for k in range(len(swaption_expiry_years_list)):
+    U = swaption_expiry_years_list[k]  # Current expiry time
+    cumulative_mu = 0.0
+    
+    # Sum over intervals [t_{j-1}, t_j] for j=0 to k
+    for j in range(k + 1):
+        if j == 0:
+            t_lower = 0.0
+            t_upper = swaption_expiry_years_list[0]
+        else:
+            t_lower = swaption_expiry_years_list[j-1]
+            t_upper = swaption_expiry_years_list[j]
+        
+        vol = sigma[j]  # Volatility for this interval
+        mu_val = mu_t(t_upper, t_lower, U, a, vol)
+        cumulative_mu += mu_val
+    
+    mu_t_cumulative_list.append(cumulative_mu)
+
+# Add to DataFrame
+swaption_schedule['mu_t_cumulative'] = mu_t_cumulative_list
+
+# Define the sigma_t function as per the formula
+def sigma_t_interval(t_upper, t_lower, U, a, sigma_val):
+    term7 = sigma_val**2 / (2 * a)
+    term8 = (np.exp(-2*a*(U - t_upper)) - np.exp(-2*a*(U - t_lower)))
+    return term7 * term8
+
+# Calculate cumulative variance for each swaption expiry
+cumulative_sigma_sq_list = []
+a = 0.05
+
+for k, U in enumerate(swaption_expiry_years_list):
+    cumulative_sigma_sq = 0.0
+    
+    # Sum over intervals [0, t0], [t0, t1], ... [t_{k-1}, t_k]
+    for j in range(k + 1):
+        if j == 0:
+            t_lower = 0.0
+            t_upper = swaption_expiry_years_list[0]
+        else:
+            t_lower = swaption_expiry_years_list[j-1]
+            t_upper = swaption_expiry_years_list[j]
+        
+        vol = sigma[j]  # Volatility for this interval
+        sigma_sq_val = sigma_t_interval(t_upper, t_lower, U, a, vol)
+        cumulative_sigma_sq += sigma_sq_val
+    
+    cumulative_sigma_sq_list.append(cumulative_sigma_sq)
+
+# Add to DataFrame
+swaption_schedule['Sigma_sq'] = cumulative_sigma_sq_list
+
+
+#epsilon_star
+epsilon_star = [-0.105437277, 2.1890626275, -0.252409876, -0.212360475, 0.813751482, -1.062310136, -2.704099306, 0.590699248,-1.351147828]
+#epsilon_star = [0.1, 0.1, -0.1, -0.1, 0.1, 0.1, 0.1, 0.1,0.1]
+#epsilon_star = [-0.0651827868, -0.0946320541, -0.252409876, -0.212360475, 0.813751482, -1.062310136, -2.704099306, 0.590699248,-1.351147828] 
+#epsilon_star = [-0.0651827868,-0.0901579279,-0.1074624425,-0.1200854204,-0.1288254691,-0.1344013590,-0.1366545571,-0.1355789130,-0.1311978955]
+
+#epsilon_star=[-0.119517336,-0.175796056,-0.222279567,-0.252369039,-0.273997931,-0.282815708,-0.286667593,-0.288475109,-0.024137661]
+
+
+
+
+
+'''
+
+
+
+# Calculate exp(B*(X_T)) for each payment date
+exp_B_XT_list = []
+
+for i, row in swaption_schedule.iterrows():
+    mu_t_val = row['mu_t_cumulative']  # μ(t)
+    sigma_sq_val = row['Sigma_sq']     # Σ²(t)
+    sigma_val = np.sqrt(sigma_sq_val)  # Σ(t)
+    epsilon = epsilon_star[i]          # ε* for this swaption
+    
+    # Calculate the term inside the exponent: μ(t) + Σ(t)ε*
+    inner_term = mu_t_val + sigma_val * epsilon
+    
+    # Get HW_B values for this swaption
+    hw_b_values = row['HW_B']
+    
+    # Calculate exp(-B(t,T_i) * inner_term) for each payment date
+    exp_B_XT_swaption = []
+    for B_val in hw_b_values:
+        exponent = -B_val * inner_term
+        exp_val = np.exp(exponent)
+        exp_B_XT_swaption.append(exp_val)
+    
+    exp_B_XT_list.append(exp_B_XT_swaption)
+
+# Add the results to the DataFrame
+swaption_schedule['exp_B_XT'] = exp_B_XT_list
+
+'''
+
+# Calculate exp(B*(X_T)) for each payment date
+exp_B_XT_list = []
+
+for i, row in swaption_schedule.iterrows():
+    mu_t_val = row['mu_t_cumulative']  # μ(t)
+    sigma_sq_val = row['Sigma_sq']     # Σ²(t)
+    sigma_val = np.sqrt(sigma_sq_val)  # Σ(t)
+    epsilon = epsilon_star[i]          # ε* for this swaption
+    
+    # Calculate the term inside the exponent: μ(t) + Σ(t)ε*
+    inner_term = mu_t_val + sigma_val * epsilon
+    
+    # Get HW_B values for this swaption
+    hw_b_values = row['HW_B']
+    
+    # Calculate exp(-B(t,T_i) * inner_term) for each payment date
+    exp_B_XT_swaption = []
+    for B_val in hw_b_values:
+        exponent = -B_val * inner_term
+        exp_val = np.exp(exponent)
+        exp_B_XT_swaption.append(exp_val)
+    
+    exp_B_XT_list.append(exp_B_XT_swaption)
+
+# Add the results to the DataFrame
+swaption_schedule['exp_B_XT'] = exp_B_XT_list
+
+
+
+
+
+
+
+# Calculate C terms for each swaption
+C_terms_list = []
+
+for i, row in swaption_schedule.iterrows():
+    # Extract relevant data
+    A_tT_values = row['A_tT']          # List of A(t,Ti) values
+    payment_times = row['payment_years']  # List of payment times in years
+    K = strikes[i]                     # Strike rate for this swaption
+    N = len(payment_times)             # Number of payment dates
+    
+    # Calculate tau_i (actual time differences between consecutive payment dates)
+    tau_values = []
+    for j in range(1, N):
+        tau_i = payment_times[j] - payment_times[j-1]
+        tau_values.append(tau_i)
+    
+    # Initialize C terms list
+    C_terms = []
+    
+    # C_0 = A(t, T_0) = 1 since T_0 = t (swaption expiry)
+    C_terms.append(1.0)  # Matches user requirement and A(t,t) = 1
+    
+    # C_i = -tau_i * K * A(t, T_i) for i from 1 to N-1 (intermediate payments)
+    for j in range(1, N-1):
+        tau_i = tau_values[j-1]  # Time difference between T_i and T_{i-1}
+        C_i = -tau_i * K * A_tT_values[j]
+        C_terms.append(C_i)
+    
+    # C_N = -(1 + tau_N * K) * A(t, T_N) for the last payment
+    tau_N = tau_values[-1]  # Time difference between T_N and T_{N-1}
+    C_N = -(1 + tau_N * K) * A_tT_values[-1]
+    C_terms.append(C_N)
+    
+    # Add the C terms for this swaption to the list
+    C_terms_list.append(C_terms)
+
+# Append the C terms to the swaption_schedule DataFrame
+swaption_schedule['C_terms'] = C_terms_list
+
+# Calculate cterm * bterm for each payment date of each swaption
+swaption_schedule['cterm_bterm'] = [
+    [c * b for c, b in zip(c_terms, exp_b_xt)]
+    for c_terms, exp_b_xt in zip(swaption_schedule['C_terms'], swaption_schedule['exp_B_XT'])
+]
+
+
+swaption_schedule['sum_cterm_bterm'] = swaption_schedule['cterm_bterm'].apply(sum)
+
+
+
+# Function to compute the sum of C_terms * exp_B_XT for a given epsilon_star
+def compute_sum_cterm_bterm(epsilon, C_terms, hw_b_values, mu_t_val, sigma_val):
+    # Calculate exp(-B(t,T_i) * (mu_t + sigma_t * epsilon)) for each payment
+    exp_B_XT = [np.exp(-B_val * (mu_t_val + sigma_val * epsilon)) for B_val in hw_b_values]
+    # Compute sum of C_terms * exp_B_XT
+    sum_cterm_bterm = sum(c * b for c, b in zip(C_terms, exp_B_XT))
+    return sum_cterm_bterm
+
+# Solve for epsilon_star for all swaptions
+epsilon_star_solved = []
+a = 0.05  # Mean reversion rate, consistent with prior code
+
+for i, row in swaption_schedule.iterrows():
+    # Extract data for this swaption
+    C_terms = row['C_terms']
+    hw_b_values = row['HW_B']
+    mu_t_val = row['mu_t_cumulative']
+    sigma_sq_val = row['Sigma_sq']
+    sigma_val = np.sqrt(sigma_sq_val)
+
+    # Define the objective function to find the root
+    def objective(epsilon):
+        return compute_sum_cterm_bterm(epsilon, C_terms, hw_b_values, mu_t_val, sigma_val)
+
+    # Use root_scalar to find epsilon_star where sum_cterm_bterm = 0
+    try:
+        result = root_scalar(objective, bracket=[-1, 1], method='brentq')
+        epsilon_star_solved.append(result.root)
+    except ValueError as e:
+        print(f"Failed to find epsilon_star for swaption {i+1} (index {i}): {e}")
+        epsilon_star_solved.append(np.nan)  # Assign NaN if root finding fails
+
+# Update the DataFrame with the solved epsilon_star values
+swaption_schedule['epsilon_star_solved'] = epsilon_star_solved
+
+# Verify the sum_cterm_bterm for each swaption with the new epsilon_star values
+sum_cterm_bterm_solved = []
+for i, row in swaption_schedule.iterrows():
+    C_terms = row['C_terms']
+    hw_b_values = row['HW_B']
+    mu_t_val = row['mu_t_cumulative']
+    sigma_sq_val = row['Sigma_sq']
+    sigma_val = np.sqrt(sigma_sq_val)
+    epsilon = row['epsilon_star_solved']
+    sum_value = compute_sum_cterm_bterm(epsilon, C_terms, hw_b_values, mu_t_val, sigma_val)
+    sum_cterm_bterm_solved.append(sum_value)
+
+# Add verified sums to DataFrame
+swaption_schedule['sum_cterm_bterm_solved'] = sum_cterm_bterm_solved
+
+from scipy.stats import norm
+import numpy as np
+
+# Function to compute the Hull-White swaption value and individual terms for a single swaption
+def compute_hw_swaption_value(C_terms, hw_b_values, mu_t_val, sigma_sq_val, epsilon_star):
+    sigma_val = np.sqrt(sigma_sq_val)  # Σ(t)
+    swaption_value = 0.0
+    individual_terms = []
+    
+    # Sum over all payment dates and store individual terms
+    for c_i, B_val in zip(C_terms, hw_b_values):
+        # Exponential term: exp(1/2 * B(t,T_i)^2 * Sigma^2(t) - B(t,T_i) * mu(t))
+        exp_term = np.exp(0.5 * B_val**2 * sigma_sq_val - B_val * mu_t_val)
+        
+        # CDF argument: -(epsilon_star + B(t,T_i) * Sigma(t))
+        phi_arg = -(epsilon_star + B_val * sigma_val)
+        
+        # CDF value: Phi(-(epsilon_star + B(t,T_i) * Sigma(t)))
+        phi_value = norm.cdf(phi_arg)
+        
+        # Term: c_i * exp_term * phi_value
+        term = c_i * exp_term * phi_value
+        individual_terms.append(term)
+        swaption_value += term
+    
+    return swaption_value, individual_terms
+
+# Compute swaption values and individual terms for all swaptions
+hw_swaption_values = []
+hw_swaption_terms = []
+
+for i, row in swaption_schedule.iterrows():
+    # Extract parameters
+    C_terms = row['C_terms']
+    hw_b_values = row['HW_B']
+    mu_t_val = row['mu_t_cumulative']
+    sigma_sq_val = row['Sigma_sq']
+    epsilon_star = row['epsilon_star_solved']
+    
+    # Handle NaN epsilon_star
+    if np.isnan(epsilon_star):
+        hw_swaption_values.append(np.nan)
+        hw_swaption_terms.append([np.nan] * len(C_terms))
+    else:
+        # Compute swaption value and individual terms
+        value, terms = compute_hw_swaption_value(C_terms, hw_b_values, mu_t_val, sigma_sq_val, epsilon_star)
+        hw_swaption_values.append(value)
+        hw_swaption_terms.append(terms)
+
+# Add to DataFrame
+
+swaption_schedule['hw_swaption_terms'] = hw_swaption_terms
+swaption_schedule['hw_swaption_value'] = hw_swaption_values
+
+
+# Compute discounted swaption values back to valuation date (08-Mar-24)
+discounted_hw_swaption_values = []
+for i, row in swaption_schedule.iterrows():
+    expiry_date_str = row['Expiry_Date']
+    expiry_date = datetime.strptime(expiry_date_str, "%d-%b-%y")
+    time_to_expiry = (expiry_date - val_date).days / 365.0  # Time in years from valuation date to expiry
+    
+    # Get discount factor for the expiry time
+    discount_factor = interp_func(time_to_expiry)
+    
+    # Discount the swaption value back to valuation date
+    swaption_value = row['hw_swaption_value']
+    if np.isnan(swaption_value):
+        discounted_hw_swaption_values.append(np.nan)
+    else:
+        discounted_value = swaption_value * discount_factor
+        discounted_hw_swaption_values.append(discounted_value)
+
+# Add discounted values to the DataFrame
+swaption_schedule['discounted_hw_swaption_value'] = discounted_hw_swaption_values
+
+
+
+
+
