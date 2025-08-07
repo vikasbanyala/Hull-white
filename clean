@@ -1,0 +1,15 @@
+import pandas as pd
+
+# Sample data
+df = pd.DataFrame({'emp_length': ['10+ years', '< 1 year', '3 years', 'n/a', None]})
+
+# Replace strings and convert to numeric
+df['emp_length_clean'] = df['emp_length'] \
+    .str.replace(r'\+ years', '', regex=True) \
+    .str.replace(r'< 1 year', '0.5') \
+    .str.replace(r'[^0-9.]', '', regex=True)
+
+# Convert to float (will turn 'n/a' or None into NaN automatically)
+df['emp_length_clean'] = pd.to_numeric(df['emp_length_clean'], errors='coerce')
+
+print(df)
