@@ -1,0 +1,19 @@
+# Data handling libs
+import numpy as np
+import pandas as pd
+
+# Lib to download the g-drive data
+import gdown
+
+# Sklearn libs
+from sklearn.model_selection import train_test_split
+
+# Data viz
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set()
+
+# Importing custom-made functions
+import sys  # Importing local functions in src folder
+sys.path.append('/Users/vbanyala/src/')  # Correct path to your src folder
+from functions import *
