@@ -1,0 +1,12 @@
+#loading dataset from Gdrive
+fname_2007etp = "https://drive.google.com/file/d/16JXrTBSgEJH4_30zlFFBye1GRHh5h4O0/view?usp=share_link"
+fname_2007etp = 'https://drive.google.com/uc?id=' + fname_2007etp.split('/')[-2]
+
+#updated dataset
+#fname_2015 = "https://drive.google.com/file/d/1Fb7LFd97aJm0ySb0A48_znfe9KQzaUZO/view?usp=share_link"
+#fname_2015 = 'https://drive.google.com/uc?id=' + fname_2015.split('/')[-2]
+
+# downloading gdrive files
+url = fname_2007etp
+output = "loan_data_2007_2014.csv"
+gdown.download(url, output, quiet=False)
